@@ -1,0 +1,356 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+---CP 8853 Final Project"
+output: html_notebook
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+```
+
+```{r}
+#install.packages('tinytex')
+#tinytex::install_tinytex()
+```
+
+
+```{r}
+setwd("~/Documents/Georgia Tech/Fall 2023/CP 8853/Final Project")
+```
+
+Load libraries
+```{r}
+library(dplyr)
+library(tmap)
+library(ggplot2)
+library(tidyverse)
+library(readxl)
+library(sf)
+library(RColorBrewer)
+library(viridis)
+library(plotly)
+library(geofacet)
+library(formattable)
+library(rmarkdown)
+
+source("functions.R")
+```
+
+
+Your task is to compare 
+(a) the energy sources of Georgia’s electricity generation and electricity CO2 emissions to 
+(b) the electricity sources and emissions of three other states, and to 
+(c) the electricity sources and emissions of the United States as a whole. One of your states must be in the southeastern US (Alabama, Florida, South Carolina, North Carolina, Virginia, and Tennessee) and the other two must be elsewhere in the United States.
+(d) produce at least one main table comparing your areas.
+
+
+1. Limit your analyses to coal, natural gas, and distillate fuel #2 (diesel) for fuel sources for electricity generation
+MSN codes 
+[character 1,2]: CL,NG, DF
+[character 3,4]:EG, EI
+[character 5]:B
+
+2. Limit your analyses to the years 1990 to most recent available year in SEDS.
+
+
+Load Complete SEDS and other datasets
+
+```{r}
+# Block 1
+
+seds1 <- read_csv("Complete_SEDS.csv") %>% 
+  tolow3()
+
+msn1 <- read_excel("Codes_and_Descriptions.xlsx", sheet="MSN Descriptions", skip=9) %>% 
+  tolow3()
+
+stateinfo1 <- read_excel("stateinfo6.xls")
+
+```
+
+
+The st1 command loads a GIS shapefile of states.
+
+```{r}
+# Block 2
+st1 <-  st_read("cb_2018_us_state_20m.shp") %>% 
+  tolow3() %>% 
+  mutate(statecode = stusps) %>% 
+  filter(statecode != "AK" & 
+           statecode != "HI" &
+           statefp <= "56") %>% 
+  mutate(stateabbr = statecode) %>% 
+  left_join(stateinfo1)
+
+```
+
+Map states
+```{r}
+tmap_mode("plot")
+st1$highlight <- ifelse(st1$statename %in% c("Alabama", "Georgia", "Indiana", "Illinois"), st1$statename, "other")
+
+state_colors <- c(
+  "Alabama" = "darkturquoise",
+  "Georgia" = "orange",
+  "Indiana" = "lightskyblue4",
+  "Illinois" = "orchid2",
+  "other" = "grey"
+)
+
+# Plot the map using tmap, setting colors based on the "highlight" column
+studymap <- tm_shape(st1) +
+  tm_fill(col = "highlight",
+          palette = state_colors,
+          title = "Case Study States")
+studymap
+
+tmap_save(studymap, "studymap.png")
+
+```
+
+Analysis of electricity major fuel trends by chosen states
+
+```{r}
+seds2 <-  seds1 %>% 
+  left_join(stateinfo1, 
+            by=c("statecode" = "stateabbr")) %>% 
+  filter(msn %in% c("CLEIB", "NGEIB", "DFEIB", "TPOPP")) %>% 
+  filter(year >= 1990) %>% 
+  mutate(divname = ifelse(is.na(divname), "United States", divname))
+```
+
+We can now group_by and summarize for the states:
+
+```{r}
+sedsdiv3 <-  seds2 %>% 
+  group_by(statecode, year, msn) %>% 
+  summarize(divdata = sum(data, na.rm=TRUE))
+```
+
+
+Create a subset of data for 4 states chosen
+```{r}
+sedsdiv3sub <- sedsdiv3 %>% 
+  filter(statecode %in% c("GA", "AL", "IL", "IN", "US") )
+```
+
+
+
+Calculate per capita fuel usage
+```{r}
+sedsdiv4 = sedsdiv3sub %>% 
+  pivot_wider(names_from=msn,values_from=divdata) %>% 
+  tolow() %>% 
+  mutate(coal = cleib/tpopp,
+         naturalgas = ngeib/tpopp,
+         diesel = dfeib/tpopp)
+
+sedsdiv4long <- sedsdiv4 %>% 
+  pivot_longer(cols = 7:9,
+               names_to = "fueltype",
+               values_to = "genpercapita")
+```
+
+
+Create plots
+```{r}
+coalgen <- ggplot(data=sedsdiv4) +
+  geom_line(aes(x=year, y=coal, col=statecode)) +
+  scale_color_brewer(palette = "Set2") +
+  ggtitle("Coal per capita energy use")
+coalgen
+
+gasgen <- ggplot(data=sedsdiv4) +
+  geom_line(aes(x=year, y=naturalgas, col=statecode)) +
+  scale_color_brewer(palette = "Set2") +
+  ggtitle("Natural gas per capita energy use")
+
+dieselgen <- ggplot(data=sedsdiv4) +
+  geom_line(aes(x=year, y=diesel, col=statecode)) +
+  scale_color_brewer(palette = "Set2") +
+  ggtitle("diesel per capita electricity generated")
+
+ggsave("coalgen.png", coalgen, width = 6, height = 4, units = "in")
+ggsave("gasgen.png", gasgen, width = 6, height = 4, units = "in")
+ggsave("dieselgen.png", dieselgen, width = 6, height = 4, units = "in")
+```
+
+facet grid to show all at once
+```{r}
+combined_generation_grid <- ggplot(data = sedsdiv4long) +
+  geom_line(aes(x = year, y = genpercapita, col = statecode), ylab = "Usage per Capita") +
+  scale_color_brewer(palette = "Set2") +
+  facet_grid(fueltype ~ statecode, scales = "free_y") +
+  ggtitle("Electricity Generation by Fuel Type and State")
+combined_generation_grid
+```
+
+
+Add in coefficients to get c02 emissions and pivot longer for joining w/ seds
+```{r}
+coef <- read_excel("coef-revised-23b.xls") %>%
+  filter(row_number() <= 13) %>% 
+  pivot_longer(cols = 3:35, names_to = "year", values_to = "coef")
+
+coef$year <- as.numeric(coef$year)
+
+```
+
+add column to seds data with just fuel code
+```{r}
+sedsdiv3sub2 <- sedsdiv3sub %>% 
+  mutate(fuelcode = substr(msn, 1, 2)) %>% 
+  filter(msn !="TPOPP") 
+
+```
+
+use left join to add coef to seds, make a new emissions column, and emissions per capita
+```{r}
+sedsdiv5 <-  sedsdiv3sub2 %>% 
+  left_join(coef, 
+            by = c("fuelcode", "year")) %>% 
+  mutate(emissions = divdata*coef) %>% 
+  left_join(sedsdiv4, by = c("year", "statecode")) %>% 
+  mutate(emitpercap = emissions/tpopp)
+ 
+```
+
+Make plots of emissions
+```{r}
+coalemit <- ggplot(data = subset(sedsdiv5, fuelname == "coal")) +
+  geom_line(aes(x=year, y=emissions, col= statecode)) +
+  scale_color_brewer(palette = "Set2") +
+  ggtitle("Coal CO2 Emissions")
+coalemit
+
+dieselemit <- ggplot(data = subset(sedsdiv5, fuelname == "distillate fuel oil no. 2")) +
+  geom_line(aes(x=year, y=emissions, col= statecode)) +
+  scale_color_brewer(palette = "Set2") +
+  ggtitle("diesel Fuel CO2 Emissions")
+
+
+gasemit <- ggplot(data = subset(sedsdiv5, fuelname == "natural gas")) +
+  geom_line(aes(x=year, y=emissions, col= statecode)) +
+  scale_color_brewer(palette = "Set2") +
+  ggtitle("Natural Gas CO2 Emissions")
+
+ggsave("coalemit.png", coalemit, width = 6, height = 4, units = "in")
+ggsave("dieselemit.png", dieselemit, width = 6, height = 4, units = "in")
+ggsave("gasemit.png", gasemit, width = 6, height = 4, units = "in")
+```
+
+
+```{r}
+combined_emissions_grid <- ggplot(data = sedsdiv5) +
+  geom_line(aes(x = year, y = emissions, col = statecode)) +
+  scale_color_brewer(palette = "Set2") +
+  facet_grid(fuelname ~ statecode, scales = "free_y") +
+  ggtitle("CO2 Emissions by Fuel Type and State")
+ggsave("combined_emissions_grid.png", combined_emissions_grid, width = 8, height = 6, units = "in")
+ggsave("combined_generation_grid.png", combined_generation_grid, width = 8, height = 6, units = "in")
+```
+
+
+
+create new combined emissions per state
+```{r}
+sedsdiv6 <- sedsdiv5 %>% 
+  group_by(statecode, year) %>% 
+  summarize(totemit = sum(emissions, na.rm = TRUE))
+```
+
+
+join shapefile to seds
+```{r}
+st2 <-  st1 %>% 
+  right_join(sedsdiv6)
+```
+
+
+
+combined emissions for each source by state
+```{r}
+sedsall2 <-  seds1 %>% 
+  left_join(stateinfo1, 
+            by=c("statecode" = "stateabbr")) %>% 
+  filter(msn %in% c("CLEIB", "NGEIB", "DFEIB", "TPOPP")) %>% 
+  filter(year >= 1990) %>% 
+  mutate(divname = ifelse(is.na(divname), "United States", divname))
+
+sedsall3 <-  sedsall2 %>% 
+  group_by(statecode, year, msn) %>% 
+  summarize(divdata = sum(data, na.rm=TRUE))%>% 
+  mutate(fuelcode = substr(msn, 1, 2)) %>% 
+  filter(msn !="TPOPP") 
+
+sedsall5 <-  sedsall3 %>% 
+  left_join(coef, 
+            by = c("fuelcode", "year")) %>% 
+  mutate(emissions = divdata*coef) %>% 
+  left_join(sedsdiv4, by = c("year", "statecode")) %>% 
+  mutate(emitpercap = emissions/tpopp)
+
+sedsall6 <- sedsall5 %>% 
+  group_by(statecode, year) %>% 
+  summarize(totemit = sum(emissions, na.rm = TRUE))
+
+sedsall7 <- sedsall5 %>% 
+  group_by(statecode, year) %>% 
+  summarise(totepercap = sum(emitpercap))
+
+sedsall3tp <-  sedsall2 %>% 
+  group_by(statecode, year, msn) %>% 
+  summarize(divdata = sum(data, na.rm=TRUE))%>% 
+  mutate(fuelcode = substr(msn, 1, 2)) 
+
+sedsall4 = sedsall3tp %>% 
+  pivot_wider(names_from=msn,values_from=divdata) %>% 
+  tolow() %>% 
+  mutate(coal = cleib/tpopp,
+         naturalgas = ngeib/tpopp,
+         diesel = dfeib/tpopp)
+
+sedsall4long <- sedsall4 %>% 
+  pivot_longer(cols = 7:9,
+               names_to = "fueltype",
+               values_to = "genpercapita")
+```
+
+create a line chart cartogram for all states 
+```{r}
+geoface1 <- ggplot(sedsall6) +
+  geom_line(aes(x = year, y = totemit)) +
+  theme_bw() +
+  facet_geo(~ statecode)
+ggsave("geofacet1.png", geoface1, width = 12, height = 6, units = "in")
+
+geofacet3 <- ggplot(sedsall5) +
+  geom_line(aes(x = year, y = emissions, col = fuelname)) +
+  theme_bw() +
+  facet_geo(~ statecode) +
+  theme(axis.text.x=element_blank()) +
+  ggtitle("CO2 Emissions by Fuel Type, 1990 - 2021")
+ggsave("geofacet3.png", geofacet3, width = 12, height = 6, units = "in")
+
+geofacet4<- ggplot(sedsall4long) +
+  geom_line(aes(x = year, y = genpercapita, col = fueltype), ylab = "Usage per Capita") +
+  theme_bw() +
+  facet_geo(~ statecode) +
+  ggtitle("Electricity Generation by Fuel Type and State")
+geofacet4
+
+
+geofacet2 <- ggplot(data = sedsall5) +
+  geom_line(aes(x = year, y = emissions, col = fuelname)) +
+  scale_color_brewer(palette = "Set2") +
+  facet_geo(~ statecode, scales = "free_y") +
+  ggtitle("CO2 Emissions by Fuel Type and State")
+geofacet2
+
+```
+
+
